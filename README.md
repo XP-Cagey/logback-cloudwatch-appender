@@ -1,6 +1,7 @@
 # Logback Appender for Amazon CloudWatch
 
-[![Build Status](https://travis-ci.org/xp-cagey/logback-cloudwatch-appender.svg?branch=master)](https://travis-ci.org/xp-cagey/logback-cloudwatch-appender) [![codecov](https://codecov.io/gh/xp-cagey/logback-cloudwatch-appender/branch/master/graph/badge.svg)](https://codecov.io/gh/xp-cagey/logback-cloudwatch-appender) [![License: MIT](https://img.shields.io/github/license/xp-cagey/logback-cloudwatch-appender.svg)](https://opensource.org/licenses/MIT)
+[![Build Status](https://travis-ci.org/xp-cagey/logback-cloudwatch-appender.svg?branch=master)](https://travis-ci.org/xp-cagey/logback-cloudwatch-appender) [![codecov](https://codecov.io/gh/xp-cagey/logback-cloudwatch-appender/branch/master/graph/badge.svg)](https://codecov.io/gh/xp-cagey/logback-cloudwatch-appender) [![Maven Central](https://img.shields.io/maven-central/v/com.xpcagey/logback-cloudwatch-appender.svg)](http://search.maven.org/#search%7Cga%7C1%7Cg%3A%22com.xpcagey%22%20AND%20a%3A%22logback-cloudwatch-appender%22) 
+
 
 This is an asynchronous implementation of a Logback appender that writes events to a specified Amazon CloudWatch log group.  It requires Java 8+ to compile.
 
