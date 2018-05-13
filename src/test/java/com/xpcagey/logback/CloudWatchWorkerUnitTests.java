@@ -14,6 +14,7 @@ import org.junit.rules.ExpectedException;
 import java.util.concurrent.ExecutionException;
 import java.util.function.Supplier;
 
+import static org.junit.Assert.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
 
@@ -51,7 +52,17 @@ public class CloudWatchWorkerUnitTests {
         ContextAware aware = mock(ContextAware.class);
 
         thrown.expect(IllegalArgumentException.class);
-        new CloudWatchWorker<ILoggingEvent>(builder, "groupName", "streamName", null, null, aware);
+        new CloudWatchWorker<>(builder, "groupName", "streamName", null, this::getTimestamp, aware);
+    }
+
+    @Test
+    public void testTimerLegal() {
+        Supplier<AWSLogs> builder = mock(AWSLogsSupplier.class);
+        Encoder<ILoggingEvent> encoder = mock(ILoggingEventEncoder.class);
+        ContextAware aware = mock(ContextAware.class);
+
+        thrown.expect(IllegalArgumentException.class);
+        new CloudWatchWorker<>(builder, "groupName", "streamName", encoder, null, aware);
     }
 
     @Test
@@ -230,6 +241,7 @@ public class CloudWatchWorkerUnitTests {
 
         thrown.expect(ExecutionException.class);
         CloudWatchWorker<ILoggingEvent> worker = new CloudWatchWorker<>(builder, "groupName", "streamName", encoder, this::getTimestamp, aware);
+        worker.setRetryHook(failures -> failures < 2);
         worker.start(this::doNothing);
         worker.add(event);
         worker.requestStop();
@@ -262,10 +274,85 @@ public class CloudWatchWorkerUnitTests {
 
         thrown.expect(ExecutionException.class);
         CloudWatchWorker<ILoggingEvent> worker = new CloudWatchWorker<>(builder, "groupName", "streamName", encoder, this::getTimestamp, aware);
+        worker.setRetryHook(failures -> failures < 2);
         worker.start(this::doNothing);
         worker.add(event);
         worker.requestStop();
         worker.join();
+    }
+
+    @Test
+    public void testMaxBatchSize() {
+        AWSLogs logs = mock(AWSLogs.class);
+        when(logs.describeLogStreams(any())).thenReturn(new DescribeLogStreamsResult().withLogStreams());
+        when(logs.createLogStream(any())).thenReturn(new CreateLogStreamResult());
+        when(logs.putLogEvents(any())).thenReturn(new PutLogEventsResult().withNextSequenceToken("next"));
+
+        Supplier<AWSLogs> builder = mock(AWSLogsSupplier.class);
+        when(builder.get()).thenReturn(logs);
+
+        Encoder<ILoggingEvent> encoder = mock(ILoggingEventEncoder.class);
+        when(encoder.headerBytes()).thenReturn(new byte[0]);
+        when(encoder.footerBytes()).thenReturn(new byte[0]);
+        when(encoder.encode(any())).thenReturn(new byte[0]);
+
+        ILoggingEvent event = mock(ILoggingEvent.class);
+
+        Context context = new LoggerContext();
+        ContextAware aware = mock(ContextAware.class);
+        when(aware.getContext()).thenReturn(context);
+
+        CloudWatchWorker<ILoggingEvent> worker = new CloudWatchWorker<>(builder, "groupName", "streamName", encoder, this::getTimestamp, aware);
+        // queued before start so they can't be consumed.
+        int sendCount = 2 * CloudWatchWorker.MAX_BATCH_SIZE + 1;
+        for (int index = 0; index < sendCount; ++index)
+            worker.add(event);
+        worker.start(this::doNothing);
+        stopAndHandle(worker);
+
+        // we should attempt to call putLogEvents exactly three times since this should be exactly 2 batches + an extra message
+        verify(logs, times(3)).putLogEvents(any());
+    }
+
+    @Test
+    public void testInterruptedException() throws ExecutionException, InterruptedException {
+        AWSLogs logs = mock(AWSLogs.class);
+        when(logs.describeLogStreams(any())).thenReturn(new DescribeLogStreamsResult().withLogStreams());
+        when(logs.createLogStream(any())).thenReturn(new CreateLogStreamResult());
+        when(logs.putLogEvents(any())).thenThrow(new ServiceUnavailableException("invalid"));
+
+        Supplier<AWSLogs> builder = mock(AWSLogsSupplier.class);
+        when(builder.get()).thenReturn(logs);
+
+        Encoder<ILoggingEvent> encoder = mock(ILoggingEventEncoder.class);
+        when(encoder.headerBytes()).thenReturn(new byte[0]);
+        when(encoder.footerBytes()).thenReturn(new byte[0]);
+        when(encoder.encode(any())).thenReturn(new byte[0]);
+
+        ILoggingEvent event = mock(ILoggingEvent.class);
+
+        Context context = new LoggerContext();
+        ContextAware aware = mock(ContextAware.class);
+        when(aware.getContext()).thenReturn(context);
+
+        CloudWatchWorker<ILoggingEvent> worker = new CloudWatchWorker<>(builder, "groupName", "streamName", encoder, this::getTimestamp, aware);
+        worker.setRetryHook((failures) -> {
+            Thread.currentThread().interrupt();
+            return false;
+        });
+        worker.start(this::doNothing);
+        worker.add(event);
+        worker.join();
+    }
+
+    @Test
+    public void testDefaultRetryHook() {
+        assertTrue(CloudWatchWorker.defaultRetryHook(0));
+        assertTrue(CloudWatchWorker.defaultRetryHook(1));
+        assertFalse(CloudWatchWorker.defaultRetryHook(CloudWatchWorker.MAX_RETRIES));
+        Thread.currentThread().interrupt();
+        assertFalse(CloudWatchWorker.defaultRetryHook(1));
+        assertTrue(Thread.interrupted());
     }
 
     private void stopAndHandle(CloudWatchWorker worker) {

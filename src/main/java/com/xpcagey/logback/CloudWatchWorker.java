@@ -8,6 +8,7 @@ import com.amazonaws.services.logs.model.*;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.function.IntPredicate;
 import java.util.function.Supplier;
 import java.util.function.ToLongFunction;
 
@@ -28,6 +29,7 @@ class CloudWatchWorker<T> {
     private final Encoder<T> encoder;
     private final ToLongFunction<T> timer;
     private final ContextAware parent;
+    private IntPredicate retryHook = CloudWatchWorker::defaultRetryHook;
     private String sequenceToken;
     private Future<Void> future;
 
@@ -38,7 +40,7 @@ class CloudWatchWorker<T> {
      * @param streamName the stream group name to use
      * @param encoder the encoder to use for message content
      * @param parent the context aware wrapper that can be used for starting the background thread and reporting errors
-     * @throws IllegalArgumentException
+     * @throws IllegalArgumentException if group name or stream name are empty or the encoder or timer are null
      */
     CloudWatchWorker(Supplier<AWSLogs> builder, String groupName, String streamName, Encoder<T> encoder, ToLongFunction<T> timer, ContextAware parent) {
         if (groupName.isEmpty())
@@ -48,7 +50,7 @@ class CloudWatchWorker<T> {
         if (encoder == null)
             throw new IllegalArgumentException("'encoder' must be set");
         if (timer == null)
-            throw new IllegalArgumentException("'encoder' must be set");
+            throw new IllegalArgumentException("'timer' must be set");
         this.logs = builder.get();
         this.groupName = groupName;
         this.streamName = streamName;
@@ -86,8 +88,8 @@ class CloudWatchWorker<T> {
 
     /**
      * Call to wait for processing to complete after calling <code>requestStop()</code>
-     * @throws InterruptedException
-     * @throws ExecutionException
+     * @throws InterruptedException if the join was interrupted
+     * @throws ExecutionException if the future returned an exception
      */
     void join() throws InterruptedException, ExecutionException {
         final Future<Void> future = this.future;
@@ -99,20 +101,23 @@ class CloudWatchWorker<T> {
      * This is the main processing loop for the background thread; it should not be referenced directly; see
      * <code>start</code> instead.
      */
-    void run() {
+    private void run() {
         List<InputLogEvent> list = new ArrayList<>();
         Optional<T> event;
         do {
             try {
                 event = this.queue.take();
             } catch (InterruptedException e) {
+                parent.addWarn("stopping due to thread interrupt");
                 Thread.currentThread().interrupt();
                 break;
             }
             list.clear();
-            while (event != null && list.size() < MAX_BATCH_SIZE) {
+            while (event != null) {
                 if (event.isPresent()) {
                     list.add(construct(timer.applyAsLong(event.get()), encoder.encode(event.get())));
+                    if (list.size() >= MAX_BATCH_SIZE)
+                        break;
                     event = this.queue.poll();
                 } else {
                     byte[] footer = encoder.footerBytes();
@@ -144,7 +149,7 @@ class CloudWatchWorker<T> {
      * are passed to the system.  Uses an optimized tail-recursive retry if AWS reports a collision in the sequence
      * token or service not available.  Uses a backoff retry of 200ms 204.8s for the service unavailable case.
      * @param events the ordered list of events to be added to the log
-     * @throws RuntimeException
+     * @throws RuntimeException if the service was not available or retries due to sequence problems were exceeded
      */
     private void send(Collection<InputLogEvent> events) {
         PutLogEventsRequest request = new PutLogEventsRequest()
@@ -153,13 +158,12 @@ class CloudWatchWorker<T> {
                 .withLogStreamName(this.streamName);
 
         RuntimeException ex = null;
-        for (int attempt = 1; attempt <= MAX_RETRIES; ++attempt) {
+        for (int failures = 0; this.retryHook.test(failures); ++failures) {
             ex = null;
             if (this.sequenceToken != null)
                 request.setSequenceToken(this.sequenceToken);
 
             try {
-                // TODO : handle issues from getRejectedLogEventsInfo
                 PutLogEventsResult result = logs.putLogEvents(request);
                 this.sequenceToken = result.getNextSequenceToken();
                 break;
@@ -171,12 +175,6 @@ class CloudWatchWorker<T> {
                 ex = e;
             } catch (ServiceUnavailableException e) {
                 ex = e;
-                try {
-                    Thread.sleep(100 * (2 ^ attempt));
-                } catch (InterruptedException e2) {
-                    Thread.currentThread().interrupt();
-                    break;
-                }
             }
         }
 
@@ -222,6 +220,31 @@ class CloudWatchWorker<T> {
             } catch (ResourceAlreadyExistsException e) {
                 // continue
             }
+        }
+    }
+
+    /**
+     * For testing - replaces the retry hook
+     * @param hook the function to call when it is time to evaluate a retry
+     */
+    void setRetryHook(IntPredicate hook) { this.retryHook = hook; }
+
+    /**
+     * Returns whether a retry should be permitted and backs off the timer if it should
+     * @param failures the number of attempts that have already failed
+     * @return true if the send should be retried again
+     */
+    static boolean defaultRetryHook(int failures) {
+        if (failures >= MAX_RETRIES)
+            return false;
+        if (failures == 0)
+            return true;
+        try {
+            Thread.sleep(100 * 2 ^ failures);
+            return true;
+        } catch (InterruptedException e2) {
+            Thread.currentThread().interrupt();
+            return false;
         }
     }
 }

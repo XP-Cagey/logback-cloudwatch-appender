@@ -146,7 +146,6 @@
                             <execution>
                                 <id>attach-javadocs</id>
                                 <goals>
-                                    <goal>javadoc</goal>
                                     <goal>jar</goal>
                                 </goals>
                             </execution>
